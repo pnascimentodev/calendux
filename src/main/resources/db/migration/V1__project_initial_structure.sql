@@ -23,6 +23,35 @@ CREATE TABLE tb_users (
                           updated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
+-- Local credentials (email/senha)
+CREATE TABLE tb_user_credentials (
+    user_id              BIGINT PRIMARY KEY,
+    password_hash        VARCHAR(255) NOT NULL,
+    password_updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT fk_user_credentials_user
+        FOREIGN KEY (user_id) REFERENCES tb_users(id)
+        ON DELETE CASCADE
+);
+
+-- OAuth identities (Google, etc.)
+CREATE TABLE tb_user_identities (
+    id                  BIGSERIAL PRIMARY KEY,
+    user_id             BIGINT NOT NULL,
+    provider            VARCHAR(30) NOT NULL,
+    provider_user_id    VARCHAR(255) NOT NULL,
+    email_from_provider VARCHAR(255),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT fk_user_identities_user
+        FOREIGN KEY (user_id) REFERENCES tb_users(id)
+        ON DELETE CASCADE,
+    CONSTRAINT uq_provider_user UNIQUE (provider, provider_user_id)
+);
+
+CREATE INDEX idx_user_identities_user_id ON tb_user_identities(user_id);
+
 -- ----------------------------
 -- Profiles (1 per user)
 -- ----------------------------
@@ -299,6 +328,16 @@ $$ LANGUAGE plpgsql;
 -- ----------------------------
 CREATE TRIGGER trg_update_users_updated_at
     BEFORE UPDATE ON tb_users
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_();
+
+CREATE TRIGGER trg_update_user_credentials_updated_at
+    BEFORE UPDATE ON tb_user_credentials
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_();
+
+CREATE TRIGGER trg_update_user_identities_updated_at
+    BEFORE UPDATE ON tb_user_identities
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_();
 
