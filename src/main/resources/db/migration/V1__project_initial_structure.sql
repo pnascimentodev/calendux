@@ -124,7 +124,7 @@ CREATE TABLE tb_availability_rules (
                                        CONSTRAINT ck_rules_time_range  CHECK (end_time <> start_time)
 );
 
--- No overlapping availability windows for same profile/day (regardless of is_available)
+-- No overlapping availability windows for the same profile /day (regardless of is_available)
 ALTER TABLE tb_availability_rules
     ADD CONSTRAINT ex_rules_no_overlap
     EXCLUDE USING gist (
