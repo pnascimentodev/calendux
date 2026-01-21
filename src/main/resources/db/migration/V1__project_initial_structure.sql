@@ -12,6 +12,17 @@
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- ----------------------------
+-- Users (base authentication table)
+-- ----------------------------
+CREATE TABLE tb_users (
+                          id         BIGSERIAL PRIMARY KEY,
+                          email      VARCHAR(255) NOT NULL UNIQUE,
+                          full_name  VARCHAR(160),
+                          created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                          updated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- ----------------------------
 -- Profiles (1 per user)
 -- ----------------------------
 CREATE TABLE tb_profiles (
@@ -70,7 +81,8 @@ CREATE TABLE tb_availability_rules (
                                        rule_range   TSRANGE GENERATED ALWAYS AS (
                                            tsrange(
                                                    ('2000-01-01'::date + start_time),
-                                                   ('2000-01-01'::date + end_time),
+                                                   ('2000-01-01'::date + end_time)
+                                                   + CASE WHEN end_time <= start_time THEN INTERVAL '1 day' ELSE INTERVAL '0' END,
                                                    '[)'
                                            )
                                            ) STORED,
@@ -79,7 +91,7 @@ CREATE TABLE tb_availability_rules (
                                            FOREIGN KEY (profile_id) REFERENCES tb_profiles(id)
                                                ON DELETE CASCADE,
                                        CONSTRAINT ck_rules_day_of_week CHECK (day_of_week BETWEEN 0 AND 6),
-                                       CONSTRAINT ck_rules_time_range  CHECK (end_time > start_time)
+                                       CONSTRAINT ck_rules_time_range  CHECK (end_time <> start_time)
 );
 
 -- No overlapping availability windows for same profile/day (regardless of is_available)
@@ -111,7 +123,8 @@ CREATE TABLE tb_availability_overrides (
                                            override_range TSRANGE GENERATED ALWAYS AS (
                                                tsrange(
                                                        (override_date + start_time),
-                                                       (override_date + end_time),
+                                                       (override_date + end_time)
+                                                       + CASE WHEN end_time <= start_time THEN INTERVAL '1 day' ELSE INTERVAL '0' END,
                                                        '[)'
                                                )
                                                ) STORED,
@@ -119,7 +132,7 @@ CREATE TABLE tb_availability_overrides (
                                            CONSTRAINT fk_overrides_profile
                                                FOREIGN KEY (profile_id) REFERENCES tb_profiles(id)
                                                    ON DELETE CASCADE,
-                                           CONSTRAINT ck_overrides_time_range CHECK (end_time > start_time)
+                                           CONSTRAINT ck_overrides_time_range CHECK (end_time <> start_time)
 );
 
 ALTER TABLE tb_availability_overrides
@@ -155,6 +168,20 @@ CREATE TABLE tb_invite_links (
 CREATE INDEX idx_invite_event_active ON tb_invite_links(event_type_id, is_active);
 
 -- ----------------------------
+-- Guests (optional profiles for unregistered invitees)
+-- ----------------------------
+CREATE TABLE tb_guests (
+                           id         BIGSERIAL PRIMARY KEY,
+                           full_name  VARCHAR(120) NOT NULL,
+                           email      VARCHAR(255) NOT NULL,
+                           created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                           updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                           CONSTRAINT uq_guests_email UNIQUE (email)
+);
+
+CREATE INDEX idx_guests_email ON tb_guests(email);
+
+-- ----------------------------
 -- Appointments
 -- Store absolute instants as timestamptz (UTC recommended)
 -- Prevent overlapping "blocking" appointments per profile at DB level
@@ -164,8 +191,7 @@ CREATE TABLE tb_appointments (
                                  profile_id    BIGINT NOT NULL,
                                  event_type_id BIGINT NOT NULL,
                                  invite_link_id BIGINT,
-                                 guest_name    VARCHAR(120) NOT NULL,
-                                 guest_email   VARCHAR(255) NOT NULL,
+                                 guest_id      BIGINT NOT NULL,
                                  starts_at     TIMESTAMPTZ NOT NULL,
                                  ends_at       TIMESTAMPTZ NOT NULL,
                                  status        VARCHAR(30) NOT NULL DEFAULT 'BOOKED',
@@ -189,11 +215,15 @@ CREATE TABLE tb_appointments (
                                      FOREIGN KEY (invite_link_id) REFERENCES tb_invite_links(id)
                                          ON DELETE SET NULL,
 
+                                 CONSTRAINT fk_appointments_guest
+                                     FOREIGN KEY (guest_id) REFERENCES tb_guests(id)
+                                         ON DELETE RESTRICT,
+
                                  CONSTRAINT ck_appointments_time_range CHECK (ends_at > starts_at),
                                  CONSTRAINT ck_appointments_status CHECK (status IN ('BOOKED', 'CANCELLED', 'COMPLETED', 'RESCHEDULED'))
 );
 
--- Prevent double-booking for blocking statuses (BOOKED/COMPLETED/RESCHEDULED)
+-- Prevent double-booking for blocking statuses (BOOKED/COMPLETED)
 -- NOTE: This relies on PostgreSQL supporting WHERE on EXCLUDE constraints (common in modern PG).
 ALTER TABLE tb_appointments
     ADD CONSTRAINT ex_appointments_no_overlap
@@ -201,14 +231,65 @@ ALTER TABLE tb_appointments
     profile_id WITH =,
     appt_range WITH &&
 )
-WHERE (status IN ('BOOKED', 'COMPLETED', 'RESCHEDULED'));
+WHERE (status IN ('BOOKED', 'COMPLETED'));
 
 CREATE INDEX idx_appointments_profile_time ON tb_appointments(profile_id, starts_at, ends_at);
 CREATE INDEX idx_appointments_event_time   ON tb_appointments(event_type_id, starts_at);
+CREATE INDEX idx_appointments_invite_status ON tb_appointments(invite_link_id, status);
+
+-- ----------------------------
+-- Enforce max bookings on invite links
+-- ----------------------------
+CREATE OR REPLACE FUNCTION enforce_invite_max_bookings()
+RETURNS TRIGGER AS $$
+DECLARE
+    max_allowed INT;
+    current_count INT;
+BEGIN
+    IF NEW.invite_link_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT max_bookings INTO max_allowed
+    FROM tb_invite_links
+    WHERE id = NEW.invite_link_id;
+
+    IF max_allowed IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.status NOT IN ('BOOKED', 'COMPLETED') THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT COUNT(*)
+    INTO current_count
+    FROM tb_appointments
+    WHERE invite_link_id = NEW.invite_link_id
+      AND status IN ('BOOKED', 'COMPLETED')
+      AND (TG_OP = 'INSERT' OR id <> NEW.id);
+
+    IF current_count >= max_allowed THEN
+        RAISE EXCEPTION 'Invite link % has reached its maximum bookings (%).', NEW.invite_link_id, max_allowed;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_enforce_invite_max_bookings
+    BEFORE INSERT OR UPDATE OF invite_link_id, status ON tb_appointments
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_invite_max_bookings();
 
 -- ----------------------------
 -- updated_at triggers (you already have update_updated_at_())
 -- ----------------------------
+CREATE TRIGGER trg_update_users_updated_at
+    BEFORE UPDATE ON tb_users
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_();
+
 CREATE TRIGGER trg_update_profiles_updated_at
     BEFORE UPDATE ON tb_profiles
     FOR EACH ROW
@@ -231,6 +312,11 @@ CREATE TRIGGER trg_update_overrides_updated_at
 
 CREATE TRIGGER trg_update_invite_links_updated_at
     BEFORE UPDATE ON tb_invite_links
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_();
+
+CREATE TRIGGER trg_update_guests_updated_at
+    BEFORE UPDATE ON tb_guests
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_();
 
