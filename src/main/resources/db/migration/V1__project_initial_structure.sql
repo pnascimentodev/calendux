@@ -13,7 +13,8 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- ----------------------------
 -- Users (base authentication table)
--- ----------------------------
+-- -----------------------
+       -- -----
 CREATE TABLE tb_users (
                           id         BIGSERIAL PRIMARY KEY,
                           email      VARCHAR(255) NOT NULL UNIQUE,
@@ -283,7 +284,18 @@ CREATE TRIGGER trg_enforce_invite_max_bookings
     EXECUTE FUNCTION enforce_invite_max_bookings();
 
 -- ----------------------------
--- updated_at triggers (you already have update_updated_at_())
+-- Generic function to refresh updated_at on row updates
+-- ----------------------------
+CREATE OR REPLACE FUNCTION update_updated_at_()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ----------------------------
+-- updated_at triggers using update_updated_at_()
 -- ----------------------------
 CREATE TRIGGER trg_update_users_updated_at
     BEFORE UPDATE ON tb_users
