@@ -13,31 +13,29 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- ----------------------------
 -- Users (base authentication table)
--- -----------------------
-       -- -----
-CREATE TABLE tb_users (
-                          id         BIGSERIAL PRIMARY KEY,
-                          email      VARCHAR(255) NOT NULL UNIQUE,
-                          full_name  VARCHAR(160),
-                          is_active  BOOLEAN NOT NULL DEFAULT TRUE,
-                          created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
-                          updated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+-- ----------------------------
+CREATE TABLE IF NOT EXISTS tb_users (
+    id         BIGSERIAL PRIMARY KEY,
+    email      VARCHAR(255) NOT NULL UNIQUE,
+    full_name  VARCHAR(160),
+    is_active  BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
--- Local credentials (email/senha)
-CREATE TABLE tb_user_credentials (
+-- Local credentials (email/password)
+-- ----------------------------
+CREATE TABLE IF NOT EXISTS tb_user_credentials (
     user_id              BIGINT PRIMARY KEY,
     password_hash        VARCHAR(255) NOT NULL,
     password_updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT fk_user_credentials_user
-        FOREIGN KEY (user_id) REFERENCES tb_users(id)
-        ON DELETE CASCADE
+    CONSTRAINT fk_user_credentials_user FOREIGN KEY (user_id) REFERENCES tb_users(id) ON DELETE CASCADE
 );
 
 -- OAuth identities (Google, etc.)
-CREATE TABLE tb_user_identities (
+CREATE TABLE IF NOT EXISTS tb_user_identities (
     id                  BIGSERIAL PRIMARY KEY,
     user_id             BIGINT NOT NULL,
     provider            VARCHAR(30) NOT NULL,
@@ -45,13 +43,11 @@ CREATE TABLE tb_user_identities (
     email_from_provider VARCHAR(255),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT fk_user_identities_user
-        FOREIGN KEY (user_id) REFERENCES tb_users(id)
-        ON DELETE CASCADE,
+    CONSTRAINT fk_user_identities_user FOREIGN KEY (user_id) REFERENCES tb_users(id) ON DELETE CASCADE,
     CONSTRAINT uq_provider_user UNIQUE (provider, provider_user_id)
 );
 
-CREATE INDEX idx_user_identities_user_id ON tb_user_identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_identities_user_id ON tb_user_identities(user_id);
 
 -- Planos
 CREATE TABLE tb_plans (
@@ -64,27 +60,26 @@ CREATE TABLE tb_plans (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Seed do plano FREE (idempotente)
+-- Seed basic plans / Seed dos planos básicos
 INSERT INTO tb_plans (code, name, description, is_active)
 VALUES ('FREE', 'Plano Free', 'Acesso limitado', TRUE)
 ON CONFLICT (code) DO NOTHING;
 
--- Seed do plano PremiumTest (idempotente)
 INSERT INTO tb_plans (code, name, description, is_active)
 VALUES ('PREMIUM_TEST', 'Premium Teste', 'Plano de teste por 7 dias', TRUE)
 ON CONFLICT (code) DO NOTHING;
 
--- current_plan_id no usuário (FK criada após tb_plans)
-ALTER TABLE tb_users
-    ADD COLUMN current_plan_id BIGINT;
-
-ALTER TABLE tb_users
-    ADD CONSTRAINT fk_users_current_plan
-        FOREIGN KEY (current_plan_id) REFERENCES tb_plans(id)
-            ON DELETE SET NULL;
+-- Add current_plan_id to users after tb_plans exists
+ALTER TABLE tb_users ADD COLUMN IF NOT EXISTS current_plan_id BIGINT;
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_users_current_plan') THEN
+        ALTER TABLE tb_users ADD CONSTRAINT fk_users_current_plan FOREIGN KEY (current_plan_id) REFERENCES tb_plans(id) ON DELETE SET NULL;
+    END IF;
+END $$;
 
 -- Planos por usuário
-CREATE TABLE tb_user_plans (
+CREATE TABLE IF NOT EXISTS tb_user_plans (
     id         BIGSERIAL PRIMARY KEY,
     user_id    BIGINT NOT NULL,
     plan_id    BIGINT NOT NULL,
@@ -93,20 +88,12 @@ CREATE TABLE tb_user_plans (
     ends_at    TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT fk_user_plans_user
-        FOREIGN KEY (user_id) REFERENCES tb_users(id)
-        ON DELETE CASCADE,
-    CONSTRAINT fk_user_plans_plan
-        FOREIGN KEY (plan_id) REFERENCES tb_plans(id)
-        ON DELETE RESTRICT,
+    CONSTRAINT fk_user_plans_user FOREIGN KEY (user_id) REFERENCES tb_users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_user_plans_plan FOREIGN KEY (plan_id) REFERENCES tb_plans(id) ON DELETE RESTRICT,
     CONSTRAINT ck_user_plans_status CHECK (status IN ('ACTIVE', 'CANCELLED', 'EXPIRED'))
 );
 
-CREATE INDEX idx_user_plans_user_id ON tb_user_plans(user_id);
--- Impede múltiplos ACTIVE por usuário
-CREATE UNIQUE INDEX ux_user_plans_active_per_user
-    ON tb_user_plans(user_id)
-    WHERE status = 'ACTIVE';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_plans_active_per_user ON tb_user_plans(user_id) WHERE status = 'ACTIVE';
 
 CREATE INDEX idx_user_plans_user_id ON tb_user_plans(user_id);
 CREATE INDEX idx_user_plans_plan_id ON tb_user_plans(plan_id);
