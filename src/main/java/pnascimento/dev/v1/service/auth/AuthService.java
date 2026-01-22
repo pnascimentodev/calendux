@@ -20,7 +20,7 @@ import java.time.OffsetDateTime;
 public class AuthService {
 
     private final UserRepository userRepository;
-    private final UserIdentityRepository userIdentityRepository; // Adicionado para Google
+    private final UserIdentityRepository userIdentityRepository;
     private final PasswordEncoder passwordEncoder;
 
     @Transactional
@@ -79,17 +79,16 @@ public class AuthService {
      */
     @Transactional
     public UserDto loginOrRegisterGoogle(String googleId, String email, String fullName) {
-        // 1. Check if this Google identity already exists / Verifica se esta identidade Google já existe
+        // Check if this Google identity already exists
         return userIdentityRepository.findByProviderAndProviderUserId("GOOGLE", googleId)
                 .map(identity -> UserMapper.toDto(identity.getUser()))
                 .orElseGet(() -> {
-                    // 2. If identity doesn't exist, check if a user with this email already exists
-                    // Se a identidade não existe, verifica se já existe um usuário com este e-mail
+                    // If identity doesn't exist, check if a user with this email already exists
                     UserEntity user = userRepository.findByEmail(email)
                             .orElseGet(() -> createNewUser(email, fullName));
 
-                    // 3. Link the Google identity to the user (new or existing)
-                    // Vincula a identidade Google ao usuário (novo ou existente)
+                    // Link the Google identity to the user (new or existing)
+
                     addGoogleIdentity(user, googleId, email);
 
                     return UserMapper.toDto(userRepository.save(user));
@@ -97,7 +96,7 @@ public class AuthService {
     }
 
     /**
-     * Helper to create a base user / Auxiliar para criar um usuário base
+     * Helper to create a base user
      */
     private UserEntity createNewUser(String email, String fullName) {
         return UserEntity.builder()
@@ -110,7 +109,7 @@ public class AuthService {
     }
 
     /**
-     * Helper to add Google provider to a user / Auxiliar para adicionar o provedor Google a um usuário
+     * Helper to add Google provider to a user
      */
     private void addGoogleIdentity(UserEntity user, String googleId, String email) {
         UserIdentityEntity identity = UserIdentityEntity.builder()
