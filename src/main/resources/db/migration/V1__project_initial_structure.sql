@@ -19,6 +19,7 @@ CREATE TABLE tb_users (
                           id         BIGSERIAL PRIMARY KEY,
                           email      VARCHAR(255) NOT NULL UNIQUE,
                           full_name  VARCHAR(160),
+                          is_active  BOOLEAN NOT NULL DEFAULT TRUE,
                           created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
                           updated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
@@ -52,6 +53,156 @@ CREATE TABLE tb_user_identities (
 
 CREATE INDEX idx_user_identities_user_id ON tb_user_identities(user_id);
 
+-- Planos
+CREATE TABLE tb_plans (
+    id          BIGSERIAL PRIMARY KEY,
+    code        VARCHAR(30) NOT NULL UNIQUE, -- FREE / PREMIUM / MASTER / PREMIUM_TEST
+    name        VARCHAR(120) NOT NULL,
+    description TEXT,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Seed do plano FREE (idempotente)
+INSERT INTO tb_plans (code, name, description, is_active)
+VALUES ('FREE', 'Plano Free', 'Acesso limitado', TRUE)
+ON CONFLICT (code) DO NOTHING;
+
+-- Seed do plano PremiumTest (idempotente)
+INSERT INTO tb_plans (code, name, description, is_active)
+VALUES ('PREMIUM_TEST', 'Premium Teste', 'Plano de teste por 7 dias', TRUE)
+ON CONFLICT (code) DO NOTHING;
+
+-- current_plan_id no usuário (FK criada após tb_plans)
+ALTER TABLE tb_users
+    ADD COLUMN current_plan_id BIGINT;
+
+ALTER TABLE tb_users
+    ADD CONSTRAINT fk_users_current_plan
+        FOREIGN KEY (current_plan_id) REFERENCES tb_plans(id)
+            ON DELETE SET NULL;
+
+-- Planos por usuário
+CREATE TABLE tb_user_plans (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL,
+    plan_id    BIGINT NOT NULL,
+    status     VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+    starts_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ends_at    TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT fk_user_plans_user
+        FOREIGN KEY (user_id) REFERENCES tb_users(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_user_plans_plan
+        FOREIGN KEY (plan_id) REFERENCES tb_plans(id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_user_plans_status CHECK (status IN ('ACTIVE', 'CANCELLED', 'EXPIRED'))
+);
+
+CREATE INDEX idx_user_plans_user_id ON tb_user_plans(user_id);
+-- Impede múltiplos ACTIVE por usuário
+CREATE UNIQUE INDEX ux_user_plans_active_per_user
+    ON tb_user_plans(user_id)
+    WHERE status = 'ACTIVE';
+
+CREATE INDEX idx_user_plans_user_id ON tb_user_plans(user_id);
+CREATE INDEX idx_user_plans_plan_id ON tb_user_plans(plan_id);
+
+-- Auto-expiração do PremiumTest (7 dias)
+CREATE OR REPLACE FUNCTION set_premium_test_expiry()
+RETURNS TRIGGER AS $$
+DECLARE
+    plan_code VARCHAR(30);
+BEGIN
+    SELECT code INTO plan_code FROM tb_plans WHERE id = NEW.plan_id;
+
+    IF plan_code = 'PREMIUM_TEST' AND NEW.ends_at IS NULL THEN
+        NEW.ends_at = now() + INTERVAL '7 days';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_set_premium_test_expiry
+    BEFORE INSERT ON tb_user_plans
+    FOR EACH ROW
+    EXECUTE FUNCTION set_premium_test_expiry();
+
+-- Função: garante plano FREE se usuário ficar sem plano ativo
+CREATE OR REPLACE FUNCTION assign_free_plan_if_missing(p_user_id BIGINT)
+RETURNS VOID AS $$
+DECLARE
+    free_plan_id BIGINT;
+    active_count INT;
+BEGIN
+    SELECT id INTO free_plan_id
+    FROM tb_plans
+    WHERE code = 'FREE' AND is_active = TRUE
+    LIMIT 1;
+
+    IF free_plan_id IS NULL THEN
+        RETURN;
+    END IF;
+
+    SELECT COUNT(*) INTO active_count
+    FROM tb_user_plans
+    WHERE user_id = p_user_id
+      AND status = 'ACTIVE';
+
+    IF active_count = 0 THEN
+        INSERT INTO tb_user_plans (user_id, plan_id, status, starts_at, created_at, updated_at)
+        VALUES (p_user_id, free_plan_id, 'ACTIVE', now(), now(), now());
+
+        UPDATE tb_users
+        SET current_plan_id = free_plan_id
+        WHERE id = p_user_id;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Ao criar usuário, garante FREE
+CREATE OR REPLACE FUNCTION trg_assign_free_on_user_insert()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM assign_free_plan_if_missing(NEW.id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_user_insert_assign_free
+    AFTER INSERT ON tb_users
+    FOR EACH ROW
+    EXECUTE FUNCTION trg_assign_free_on_user_insert();
+
+-- Mantém current_plan_id sincronizado
+CREATE OR REPLACE FUNCTION trg_sync_current_plan()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'ACTIVE' THEN
+        UPDATE tb_users
+        SET current_plan_id = NEW.plan_id
+        WHERE id = NEW.user_id;
+    ELSIF NEW.status IN ('CANCELLED', 'EXPIRED') THEN
+        IF (SELECT current_plan_id FROM tb_users WHERE id = NEW.user_id) = NEW.plan_id THEN
+            UPDATE tb_users
+            SET current_plan_id = NULL
+            WHERE id = NEW.user_id;
+            PERFORM assign_free_plan_if_missing(NEW.user_id);
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_user_plan_sync_current_plan
+    AFTER INSERT OR UPDATE OF status ON tb_user_plans
+    FOR EACH ROW
+    EXECUTE FUNCTION trg_sync_current_plan();
 -- ----------------------------
 -- Profiles (1 per user)
 -- ----------------------------
@@ -338,6 +489,16 @@ CREATE TRIGGER trg_update_user_credentials_updated_at
 
 CREATE TRIGGER trg_update_user_identities_updated_at
     BEFORE UPDATE ON tb_user_identities
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_();
+
+CREATE TRIGGER trg_update_plans_updated_at
+    BEFORE UPDATE ON tb_plans
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_();
+
+CREATE TRIGGER trg_update_user_plans_updated_at
+    BEFORE UPDATE ON tb_user_plans
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_();
 
