@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import pnascimento.dev.v1.dto.user.AuthResponseDto;
 import pnascimento.dev.v1.dto.user.UserDto;
 import pnascimento.dev.v1.entity.user.UserCredentialsEntity;
 import pnascimento.dev.v1.entity.user.UserEntity;
@@ -22,6 +23,7 @@ public class AuthService {
     private final UserRepository userRepository;
     private final UserIdentityRepository userIdentityRepository;
     private final PasswordEncoder passwordEncoder;
+    private final TokenService tokenService;
 
     @Transactional
     public UserDto registerLocal(String email, String password, String fullName) {
@@ -54,8 +56,8 @@ public class AuthService {
         return UserMapper.toDto(savedUser);
     }
 
-    @Transactional(readOnly = true)
-    public UserDto loginLocal(String email, String rawPassword) {
+    @Transactional
+    public AuthResponseDto loginLocal(String email, String rawPassword) {
         UserEntity user = userRepository.findByEmailFetchPlan(email)
                 .orElseThrow(AuthException.InvalidCredentials::new);
 
@@ -71,28 +73,59 @@ public class AuthService {
             throw new AuthException.InvalidCredentials();
         }
 
-        return UserMapper.toDto(user);
+        // Gerar tokens de acesso
+        String accessToken = tokenService.generateAccessToken(user);
+        String refreshToken = tokenService.generateRefreshToken(user);
+
+        return AuthResponseDto.builder()
+                .user(UserMapper.toDto(user))
+                .accessToken(accessToken)
+                .refreshToken(refreshToken)
+                .tokenType("Bearer")
+                .build();
+    }
+
+    @Transactional
+    public void logoutLocal(String token) {
+        // Revogar o token específico
+        tokenService.revokeToken(token);
+    }
+
+    @Transactional
+    public void logoutAllSessions(Long userId) {
+        // Revogar todos os tokens do usuário
+        tokenService.revokeAllUserTokens(userId);
     }
 
     /**
      * Method for logging in/registering via Google (OAuth2)
      */
     @Transactional
-    public UserDto loginOrRegisterGoogle(String googleId, String email, String fullName) {
+    public AuthResponseDto loginOrRegisterGoogle(String googleId, String email, String fullName) {
         // Check if this Google identity already exists
-        return userIdentityRepository.findByProviderAndProviderUserId("GOOGLE", googleId)
-                .map(identity -> UserMapper.toDto(identity.getUser()))
+        UserEntity user = userIdentityRepository.findByProviderAndProviderUserId("GOOGLE", googleId)
+                .map(UserIdentityEntity::getUser)
                 .orElseGet(() -> {
                     // If identity doesn't exist, check if a user with this email already exists
-                    UserEntity user = userRepository.findByEmail(email)
+                    UserEntity existingUser = userRepository.findByEmail(email)
                             .orElseGet(() -> createNewUser(email, fullName));
 
                     // Link the Google identity to the user (new or existing)
+                    addGoogleIdentity(existingUser, googleId, email);
 
-                    addGoogleIdentity(user, googleId, email);
-
-                    return UserMapper.toDto(userRepository.save(user));
+                    return userRepository.save(existingUser);
                 });
+
+        // Gerar tokens de acesso
+        String accessToken = tokenService.generateAccessToken(user);
+        String refreshToken = tokenService.generateRefreshToken(user);
+
+        return AuthResponseDto.builder()
+                .user(UserMapper.toDto(user))
+                .accessToken(accessToken)
+                .refreshToken(refreshToken)
+                .tokenType("Bearer")
+                .build();
     }
 
     /**

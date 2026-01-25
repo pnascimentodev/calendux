@@ -523,3 +523,19 @@ CREATE TRIGGER trg_update_appointments_updated_at
     BEFORE UPDATE ON tb_appointments
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_();
+
+CREATE TABLE tb_user_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    token VARCHAR(512) NOT NULL UNIQUE,
+    token_type VARCHAR(50) NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    is_revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT fk_user_tokens_user FOREIGN KEY (user_id) REFERENCES tb_users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_user_tokens_user_id ON tb_user_tokens(user_id);
+CREATE INDEX idx_user_tokens_token ON tb_user_tokens(token);
+CREATE INDEX idx_user_tokens_is_revoked ON tb_user_tokens(is_revoked);
